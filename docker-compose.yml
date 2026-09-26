@@ -1,0 +1,96 @@
+services:
+
+  # Docker-in-Docker service.
+  # This provides a dedicated Docker daemon for Jenkins builds instead of
+  # exposing the RONIN host Docker socket directly to Jenkins.
+  docker:
+    image: docker:29-dind
+    container_name: isec6000-docker
+    privileged: true
+
+    environment:
+      # Enables automatic TLS certificate generation for the Docker daemon.
+      DOCKER_TLS_CERTDIR: /certs
+
+    volumes:
+      # Shares generated Docker client TLS certificates with Jenkins.
+      - jenkins-docker-certs:/certs/client
+
+      # Persists Docker images and build layers across container restarts.
+      - docker-data:/var/lib/docker
+
+    networks:
+      - jenkins-network
+
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
+
+  # Jenkins controller service.
+  # Uses the custom image containing Git and the Docker CLI.
+  jenkins:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: isec6000-jenkins:latest
+    container_name: isec6000-jenkins
+
+    depends_on:
+      docker:
+        condition: service_healthy
+
+    environment:
+      # Points the Docker CLI in Jenkins to the dedicated DinD daemon.
+      DOCKER_HOST: tcp://docker:2376
+
+      # Tells the Docker CLI where the generated client TLS certificates are.
+      DOCKER_CERT_PATH: /certs/client
+
+      # Requires encrypted and certificate-verified communication with DinD.
+      DOCKER_TLS_VERIFY: "1"
+
+    volumes:
+      # Persists Jenkins configuration, jobs, plugins, users and build history.
+      - jenkins-data:/var/jenkins_home
+
+      # Gives Jenkins read-only access to the Docker TLS client certificates.
+      - jenkins-docker-certs:/certs/client:ro
+
+    ports:
+      # Bind Jenkins only to the RONIN loopback interface.
+      # It will later be accessed securely using SSH port forwarding.
+      - "127.0.0.1:8080:8080"
+
+    networks:
+      - jenkins-network
+
+    security_opt:
+      # Prevent processes inside Jenkins from gaining additional privileges.
+      - no-new-privileges:true
+
+    restart: unless-stopped
+
+
+# Named volumes keep important state when containers are recreated.
+volumes:
+
+  # Persistent Jenkins home directory.
+  jenkins-data:
+
+  # TLS certificates shared between DinD and Jenkins.
+  jenkins-docker-certs:
+
+  # Persistent Docker images and layers created by Jenkins builds.
+  docker-data:
+
+
+# Dedicated network used only for communication between Jenkins and DinD.
+networks:
+  jenkins-network:
+    driver: bridge
